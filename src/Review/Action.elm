@@ -7,8 +7,10 @@ module Review.Action exposing (rule)
 -}
 
 import Elm.Syntax.Declaration
+import Elm.Syntax.Exposing
 import Elm.Syntax.Expression
 import Elm.Syntax.Infix
+import Elm.Syntax.Module
 import Elm.Syntax.ModuleName
 import Elm.Syntax.Node
 import Elm.Syntax.Pattern
@@ -29,6 +31,7 @@ import Review.Rule
 ### available actions
 
   - `function {-!inline-} arguments`: substitute its arguments into the implementation code
+  - `declarationName ... = {-!remove-} ...`: Unexpose `declarationName`, remove it's @docs tag and delete its declaration code
 
 -}
 rule : Review.Rule.Rule
@@ -39,12 +42,40 @@ rule =
         |> Review.Rule.withModuleVisitor
             (\moduleVisitor ->
                 moduleVisitor
+                    |> Review.Rule.withModuleDefinitionVisitor
+                        (\(Elm.Syntax.Node.Node _ moduleHeader) context ->
+                            ( []
+                            , { moduleOriginLookup = context.moduleOriginLookup
+                              , extractSourceCode = context.extractSourceCode
+                              , importedModules = context.importedModules
+                              , moduleExposing = moduleHeader |> moduleHeaderExposing
+                              , moduleDocumentation = context.moduleDocumentation
+                              , comments = context.comments
+                              , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              }
+                            )
+                        )
+                    |> Review.Rule.withModuleDocumentationVisitor
+                        (\maybeModuleDocumentationNode context ->
+                            ( []
+                            , { moduleOriginLookup = context.moduleOriginLookup
+                              , extractSourceCode = context.extractSourceCode
+                              , importedModules = context.importedModules
+                              , moduleExposing = context.moduleExposing
+                              , moduleDocumentation = maybeModuleDocumentationNode
+                              , comments = context.comments
+                              , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              }
+                            )
+                        )
                     |> Review.Rule.withCommentsVisitor
                         (\comments context ->
                             ( []
                             , { moduleOriginLookup = context.moduleOriginLookup
                               , extractSourceCode = context.extractSourceCode
                               , importedModules = context.importedModules
+                              , moduleExposing = context.moduleExposing
+                              , moduleDocumentation = context.moduleDocumentation
                               , comments = comments
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
                               }
@@ -56,6 +87,8 @@ rule =
                             , { moduleOriginLookup = context.moduleOriginLookup
                               , extractSourceCode = context.extractSourceCode
                               , importedModules = context.importedModules
+                              , moduleExposing = context.moduleExposing
+                              , moduleDocumentation = context.moduleDocumentation
                               , comments = context.comments
                               , declaredExpressionImplementations =
                                     declarations
@@ -82,18 +115,23 @@ rule =
                               }
                             )
                         )
+                    |> Review.Rule.withDeclarationEnterVisitor
+                        (\declarationNode context ->
+                            ( declarationCheck context declarationNode
+                            , context
+                            )
+                        )
                     |> Review.Rule.withExpressionEnterVisitor
                         (\expressionNode context ->
                             ( case expressionNode of
                                 Elm.Syntax.Node.Node callRange (Elm.Syntax.Expression.Application ((Elm.Syntax.Node.Node referenceRange (Elm.Syntax.Expression.FunctionOrValue _ referenceUnqualified)) :: argument0 :: argument1Up)) ->
-                                    checkCall
+                                    callCheck context
                                         { range = callRange
                                         , referenceRange = referenceRange
                                         , referenceUnqualified = referenceUnqualified
                                         , argument0 = argument0
                                         , argument1Up = argument1Up
                                         }
-                                        context
 
                                 _ ->
                                     []
@@ -109,16 +147,246 @@ rule =
         |> Review.Rule.fromProjectRuleSchema
 
 
-checkCall :
-    { referenceRange : Elm.Syntax.Range.Range
-    , argument0 : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
-    , referenceUnqualified : String
-    , range : { end : Elm.Syntax.Range.Location, start : Elm.Syntax.Range.Location }
-    , argument1Up : List (Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression)
-    }
-    -> ModuleContext
+declarationCheck :
+    ModuleContext
+    -> Elm.Syntax.Node.Node Elm.Syntax.Declaration.Declaration
     -> List (Review.Rule.Error {})
-checkCall call context =
+declarationCheck context (Elm.Syntax.Node.Node declarationRange declaration) =
+    let
+        maybeDeclarationInfo :
+            Maybe
+                { removeMarkCommentRange : Elm.Syntax.Range.Range
+                , name : Elm.Syntax.Node.Node String
+                }
+        maybeDeclarationInfo =
+            case declaration of
+                Elm.Syntax.Declaration.FunctionDeclaration valueOrFunctionDeclaration ->
+                    let
+                        implementation : Elm.Syntax.Expression.FunctionImplementation
+                        implementation =
+                            valueOrFunctionDeclaration.declaration |> Elm.Syntax.Node.value
+                    in
+                    Just
+                        { removeMarkCommentRange =
+                            { start =
+                                case implementation.arguments of
+                                    [] ->
+                                        implementation.name |> Elm.Syntax.Node.range |> .end
+
+                                    parameter0 :: parameter1Up ->
+                                        listFilledLast ( parameter0, parameter1Up )
+                                            |> Elm.Syntax.Node.range
+                                            |> .end
+                            , end =
+                                implementation.expression
+                                    |> Elm.Syntax.Node.range
+                                    |> .start
+                            }
+                        , name = implementation.name
+                        }
+
+                Elm.Syntax.Declaration.AliasDeclaration typeAliasDeclaration ->
+                    Just
+                        { removeMarkCommentRange =
+                            { start =
+                                case typeAliasDeclaration.generics of
+                                    [] ->
+                                        typeAliasDeclaration.name |> Elm.Syntax.Node.range |> .end
+
+                                    parameter0 :: parameter1Up ->
+                                        listFilledLast ( parameter0, parameter1Up )
+                                            |> Elm.Syntax.Node.range
+                                            |> .end
+                            , end =
+                                typeAliasDeclaration.typeAnnotation
+                                    |> Elm.Syntax.Node.range
+                                    |> .start
+                            }
+                        , name = typeAliasDeclaration.name
+                        }
+
+                Elm.Syntax.Declaration.CustomTypeDeclaration choiceTypeDeclaration ->
+                    case choiceTypeDeclaration.constructors of
+                        [] ->
+                            Nothing
+
+                        (Elm.Syntax.Node.Node firstVariantRange _) :: _ ->
+                            Just
+                                { removeMarkCommentRange =
+                                    { start =
+                                        case choiceTypeDeclaration.generics of
+                                            [] ->
+                                                choiceTypeDeclaration.name |> Elm.Syntax.Node.range |> .end
+
+                                            parameter0 :: parameter1Up ->
+                                                listFilledLast ( parameter0, parameter1Up )
+                                                    |> Elm.Syntax.Node.range
+                                                    |> .end
+                                    , end = firstVariantRange.start
+                                    }
+                                , name = choiceTypeDeclaration.name
+                                }
+
+                Elm.Syntax.Declaration.PortDeclaration _ ->
+                    Nothing
+
+                Elm.Syntax.Declaration.InfixDeclaration _ ->
+                    Nothing
+
+                Elm.Syntax.Declaration.Destructuring _ _ ->
+                    Nothing
+    in
+    case maybeDeclarationInfo of
+        Nothing ->
+            []
+
+        Just declarationInfo ->
+            if
+                commentsInRange declarationInfo.removeMarkCommentRange context.comments
+                    |> List.any (\comment -> comment |> String.contains "!remove")
+            then
+                [ Review.Rule.errorWithFix
+                    { message = "remove declaration " ++ (declarationInfo.name |> Elm.Syntax.Node.value)
+                    , details =
+                        [ "The action command !remove placed in a comment at the top of the declaration "
+                            ++ (declarationInfo.name |> Elm.Syntax.Node.value)
+                            ++ " triggers the suggestion of this automatic fix. Either apply the fix or remove the comment."
+                        ]
+                    }
+                    (declarationInfo.name |> Elm.Syntax.Node.range)
+                    (Review.Fix.removeRange
+                        { start = declarationRange.start
+                        , end = { row = declarationRange.end.row + 1, column = 1 }
+                        }
+                        :: (case context.moduleDocumentation of
+                                Nothing ->
+                                    []
+
+                                Just moduleDocumentationNode ->
+                                    moduleDocumentationRemoveDocsFix
+                                        (declarationInfo.name |> Elm.Syntax.Node.value)
+                                        moduleDocumentationNode
+                           )
+                        ++ (case context.moduleExposing of
+                                Elm.Syntax.Exposing.All _ ->
+                                    []
+
+                                Elm.Syntax.Exposing.Explicit exposes ->
+                                    case exposes of
+                                        [] ->
+                                            []
+
+                                        [ _ ] ->
+                                            []
+
+                                        (Elm.Syntax.Node.Node expose0Range expose0) :: (Elm.Syntax.Node.Node expose1Range expose1) :: expose2Up ->
+                                            if exposeDeclarationName expose0 == (declarationInfo.name |> Elm.Syntax.Node.value) then
+                                                [ Review.Fix.removeRange
+                                                    { start = expose0Range.start, end = expose1Range.start }
+                                                ]
+
+                                            else
+                                                (Elm.Syntax.Node.Node expose1Range expose1 :: expose2Up)
+                                                    |> List.foldl
+                                                        (\(Elm.Syntax.Node.Node exposeRange expose) soFar ->
+                                                            { fixes =
+                                                                if exposeDeclarationName expose == (declarationInfo.name |> Elm.Syntax.Node.value) then
+                                                                    Review.Fix.removeRange { start = soFar.end, end = exposeRange.end }
+                                                                        :: soFar.fixes
+
+                                                                else
+                                                                    soFar.fixes
+                                                            , end = exposeRange.end
+                                                            }
+                                                        )
+                                                        { fixes = [], end = expose0Range.end }
+                                                    |> .fixes
+                           )
+                    )
+                ]
+
+            else
+                []
+
+
+moduleDocumentationRemoveDocsFix : String -> Elm.Syntax.Node.Node String -> List Review.Fix.Fix
+moduleDocumentationRemoveDocsFix nameToRemove (Elm.Syntax.Node.Node moduleDocumentationRange moduleDocumentation) =
+    moduleDocumentation
+        |> String.lines
+        |> List.indexedMap
+            (\lineIndex line ->
+                if line |> String.startsWith "@docs " then
+                    let
+                        declarationNamesInDocsLine : List String
+                        declarationNamesInDocsLine =
+                            line
+                                |> String.slice 6 (line |> String.length)
+                                |> String.split ","
+                                |> List.map String.trim
+                    in
+                    if declarationNamesInDocsLine |> List.member nameToRemove then
+                        let
+                            absoluteRow : Int
+                            absoluteRow =
+                                moduleDocumentationRange.start.row + lineIndex
+                        in
+                        [ Review.Fix.replaceRangeBy
+                            { start = { row = absoluteRow, column = 1 }
+                            , end = { row = absoluteRow + 1, column = 1 }
+                            }
+                            (case declarationNamesInDocsLine of
+                                [] ->
+                                    ""
+
+                                [ _ ] ->
+                                    ""
+
+                                name0 :: name1Up ->
+                                    "@docs "
+                                        ++ ((name0 :: name1Up)
+                                                |> List.filter (\name -> name /= nameToRemove)
+                                                |> String.join ", "
+                                           )
+                                        ++ "\n"
+                            )
+                        ]
+
+                    else
+                        []
+
+                else
+                    []
+            )
+        |> List.concat
+
+
+exposeDeclarationName : Elm.Syntax.Exposing.TopLevelExpose -> String
+exposeDeclarationName expose =
+    case expose of
+        Elm.Syntax.Exposing.InfixExpose operator ->
+            operator
+
+        Elm.Syntax.Exposing.FunctionExpose name ->
+            name
+
+        Elm.Syntax.Exposing.TypeOrAliasExpose name ->
+            name
+
+        Elm.Syntax.Exposing.TypeExpose typeExpose ->
+            typeExpose.name
+
+
+callCheck :
+    ModuleContext
+    ->
+        { referenceRange : Elm.Syntax.Range.Range
+        , argument0 : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
+        , referenceUnqualified : String
+        , range : { end : Elm.Syntax.Range.Location, start : Elm.Syntax.Range.Location }
+        , argument1Up : List (Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression)
+        }
+    -> List (Review.Rule.Error {})
+callCheck context call =
     let
         hasInlineMark : Bool
         hasInlineMark =
@@ -340,6 +608,8 @@ type alias ProjectContext =
 type alias ModuleContext =
     { extractSourceCode : Elm.Syntax.Range.Range -> String
     , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
+    , moduleExposing : Elm.Syntax.Exposing.Exposing
+    , moduleDocumentation : Maybe (Elm.Syntax.Node.Node String)
     , comments : List (Elm.Syntax.Node.Node String)
     , declaredExpressionImplementations :
         FastDict.Dict
@@ -378,6 +648,8 @@ projectToModuleContext =
         (\moduleOriginLookup extractSourceCode projectContext ->
             { moduleOriginLookup = moduleOriginLookup
             , extractSourceCode = extractSourceCode
+            , moduleExposing = Elm.Syntax.Exposing.All Elm.Syntax.Range.empty
+            , moduleDocumentation = Nothing
             , comments = []
             , declaredExpressionImplementations = FastDict.empty
             , importedModules = projectContext.byModule
@@ -824,6 +1096,29 @@ expressionSubs (Elm.Syntax.Node.Node _ expression) =
 
         Elm.Syntax.Expression.GLSLExpression _ ->
             []
+
+
+moduleHeaderExposing : Elm.Syntax.Module.Module -> Elm.Syntax.Exposing.Exposing
+moduleHeaderExposing moduleHeader =
+    case moduleHeader of
+        Elm.Syntax.Module.NormalModule info ->
+            info.exposingList |> Elm.Syntax.Node.value
+
+        Elm.Syntax.Module.PortModule info ->
+            info.exposingList |> Elm.Syntax.Node.value
+
+        Elm.Syntax.Module.EffectModule info ->
+            info.exposingList |> Elm.Syntax.Node.value
+
+
+listFilledLast : ( a, List a ) -> a
+listFilledLast ( head, tail ) =
+    case tail of
+        [] ->
+            head
+
+        tailHead :: tailTail ->
+            listFilledLast ( tailHead, tailTail )
 
 
 listLastAlter : (a -> a) -> (List a -> List a)

@@ -31,11 +31,10 @@ since elm-review is supported by the language server.
 ### future action candidates
 
   - ❇ [your most common refactor kind](https://github.com/lue-bird/elm-review-action/issues/new). Make sure an actual review rule isn't better suited
+  - "backwards inline" a value/function/alias type (inline it in all places it's used)
   - inline selected core implementations like Maybe.map, Result.withDefault or List.head
-  - `declaration = {-!remove-} ...`: remove it's expose, it's @docs tag and it's implementation
+  - `| Variant {-!remove-} ...`: remove the variant declaration and the cases matching on it
   - inline values, types
       - where to put the comment so it can be recognized? On the same line as a single-line comment?
-  - "backwards inline" a value/function/alias type (inline it in all places it's used)
   - `functionDeclaration argumentA {-!swap-} argumentB`: move arguments a and b in the declaration and all uses
-      - elm-review does not have cross-file fixes :(
-  - maybe invert if (negate condition, swap on true and on false branches)
+      - elm-review does not have cross-file fixes
