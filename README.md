@@ -2,13 +2,13 @@ The [`elm-review`](https://package.elm-lang.org/packages/jfmengels/elm-review/la
 [`Review.Action`](https://package.elm-lang.org/packages/lue-bird/elm-review-action/1.0.0/Review-Action)
 transforms your code as specified by comments like `--!inline`.
 
-## try it
+### try it
 
 ```bash
 elm-review --template lue-bird/elm-review-action/example
 ```
 
-## add to your project
+### add to your project
 
 ```elm
 module ReviewConfig exposing (config)
