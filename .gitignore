@@ -1,5 +1,7 @@
 node_modules/
 elm-stuff/
+docs.json
+package-lock.json
 
 # Editors
 .idea/
