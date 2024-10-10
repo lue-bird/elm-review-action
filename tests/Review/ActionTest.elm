@@ -1,0 +1,204 @@
+module Review.ActionTest exposing (all)
+
+import Review.Action
+import Review.Test
+import Test
+
+
+all : Test.Test
+all =
+    Test.describe "Review.Action"
+        [ Test.test "fully applied, module-locally declared, variable pattern, simple argument"
+            (\() ->
+                """module A exposing (..)
+add2 x =
+    x + 2
+
+a =
+        add2
+            {-!inline-}
+            1
+"""
+                    |> Review.Test.run Review.Action.rule
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "inline add2"
+                            , details = [ "The action command !inline placed in a comment after add2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                            , under = "add2"
+                            }
+                            |> Review.Test.atExactly
+                                { start = { row = 6, column = 9 }, end = { row = 6, column = 13 } }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+add2 x =
+    x + 2
+
+a =
+        (1 + 2)
+"""
+                        ]
+            )
+        , Test.test "partially applied, module-locally declared, variable pattern, simple argument"
+            (\() ->
+                """module A exposing (..)
+multiplyAndAdd2 x y =
+    x * y + 2
+
+a =
+        multiplyAndAdd2
+            {-!inline-}
+            1
+"""
+                    |> Review.Test.run Review.Action.rule
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "inline multiplyAndAdd2"
+                            , details = [ "The action command !inline placed in a comment after multiplyAndAdd2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                            , under = "multiplyAndAdd2"
+                            }
+                            |> Review.Test.atExactly
+                                { start = { row = 6, column = 9 }, end = { row = 6, column = 24 } }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+multiplyAndAdd2 x y =
+    x * y + 2
+
+a =
+        (\\y ->
+            1 * y + 2)
+"""
+                        ]
+            )
+        , Test.test "fully applied, declared in imported module, variable pattern, simple argument"
+            (\() ->
+                [ """module Add2 exposing (add2)
+add2 x =
+    x + 2
+"""
+                , """module A exposing (..)
+import Add2
+
+a =
+        Add2.add2
+            {-!inline-}
+            1
+"""
+                ]
+                    |> Review.Test.runOnModules Review.Action.rule
+                    |> Review.Test.expectErrorsForModules
+                        [ ( "A"
+                          , [ Review.Test.error
+                                { message = "inline Add2.add2"
+                                , details = [ "The action command !inline placed in a comment after Add2.add2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                                , under = "Add2.add2"
+                                }
+                                |> Review.Test.whenFixed
+                                    """module A exposing (..)
+import Add2
+
+a =
+        (1 + 2)
+"""
+                            ]
+                          )
+                        ]
+            )
+        , Test.test "fully applied, ignore pattern"
+            (\() ->
+                """module A exposing (..)
+always2 _ =
+    2
+
+a =
+        always2
+            {-!inline-}
+            1
+"""
+                    |> Review.Test.run Review.Action.rule
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "inline always2"
+                            , details = [ "The action command !inline placed in a comment after always2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                            , under = "always2"
+                            }
+                            |> Review.Test.atExactly
+                                { start = { row = 6, column = 9 }, end = { row = 6, column = 16 } }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+always2 _ =
+    2
+
+a =
+        (2)
+"""
+                        ]
+            )
+        , Test.test "fully applied, non-simple pattern"
+            (\() ->
+                """module A exposing (..)
+add2 (_ as x) =
+    x + 2
+
+a =
+        add2
+            {-!inline-}
+            1
+"""
+                    |> Review.Test.run Review.Action.rule
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "inline add2"
+                            , details = [ "The action command !inline placed in a comment after add2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                            , under = "add2"
+                            }
+                            |> Review.Test.atExactly
+                                { start = { row = 6, column = 9 }, end = { row = 6, column = 13 } }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+add2 (_ as x) =
+    x + 2
+
+a =
+        (let
+            (_ as x) =
+                1
+         in
+         x + 2)
+"""
+                        ]
+            )
+        , Test.test "fully applied, variable pattern, non-simple argument"
+            (\() ->
+                """module A exposing (..)
+add2 x =
+    x + 2
+
+a =
+        add2
+            {-!inline-}
+            (1 * 1)
+"""
+                    |> Review.Test.run Review.Action.rule
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "inline add2"
+                            , details = [ "The action command !inline placed in a comment after add2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                            , under = "add2"
+                            }
+                            |> Review.Test.atExactly
+                                { start = { row = 6, column = 9 }, end = { row = 6, column = 13 } }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+add2 x =
+    x + 2
+
+a =
+        (let
+            x =
+                (1 * 1)
+         in
+         x + 2)
+"""
+                        ]
+            )
+        ]
