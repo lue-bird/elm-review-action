@@ -19,7 +19,7 @@ import Review.ModuleNameLookupTable
 import Review.Rule
 
 
-{-| Applies code transformations marked by !COMMAND comments
+{-| Applies code transformations marked by !action comments
 
     config =
         [ Review.Action.rule
