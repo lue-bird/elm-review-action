@@ -55,6 +55,7 @@ rule =
                               , moduleExposing = moduleHeader |> moduleHeaderExposing
                               , importStartRow = moduleHeaderRange.end.row + 1
                               , imports = context.imports
+                              , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
                               }
                             )
                         )
@@ -67,8 +68,9 @@ rule =
                               , moduleExposing = context.moduleExposing
                               , comments = context.comments
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
-                              , moduleDocumentation = maybeModuleDocumentationNode
                               , imports = context.imports
+                              , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
+                              , moduleDocumentation = maybeModuleDocumentationNode
                               , importStartRow =
                                     case maybeModuleDocumentationNode of
                                         Nothing ->
@@ -89,10 +91,22 @@ rule =
                               , moduleDocumentation = context.moduleDocumentation
                               , comments = context.comments
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
                               , importStartRow = importRange.end.row + 1
                               , imports =
                                     context.imports
-                                        |> FastSet.insert (import_.moduleName |> Elm.Syntax.Node.value)
+                                        |> FastDict.update (import_.moduleName |> Elm.Syntax.Node.value)
+                                            (\maybeAliasBefore ->
+                                                Just
+                                                    { alias =
+                                                        case import_.moduleAlias of
+                                                            Nothing ->
+                                                                maybeAliasBefore |> Maybe.andThen .alias
+
+                                                            Just (Elm.Syntax.Node.Node _ newAlias) ->
+                                                                Just (newAlias |> String.join ".")
+                                                    }
+                                            )
                               }
                             )
                         )
@@ -108,6 +122,7 @@ rule =
                               , imports = context.imports
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
                               , comments = comments
+                              , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
                               }
                             )
                         )
@@ -122,6 +137,24 @@ rule =
                               , importStartRow = context.importStartRow
                               , comments = context.comments
                               , imports = context.imports
+                              , moduleExpressionDeclarationNames =
+                                    declarations
+                                        |> List.foldl
+                                            (\(Elm.Syntax.Node.Node _ declaration) soFar ->
+                                                case declaration of
+                                                    Elm.Syntax.Declaration.FunctionDeclaration expressionDeclaration ->
+                                                        soFar
+                                                            |> FastSet.insert
+                                                                (expressionDeclaration.declaration
+                                                                    |> Elm.Syntax.Node.value
+                                                                    |> .name
+                                                                    |> Elm.Syntax.Node.value
+                                                                )
+
+                                                    _ ->
+                                                        soFar
+                                            )
+                                            FastSet.empty
                               , declaredExpressionImplementations =
                                     declarations
                                         |> List.foldl
@@ -450,6 +483,7 @@ callCheck context call =
                                     }
                             , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
                             , extractSourceCode : Elm.Syntax.Range.Range -> String
+                            , moduleExpressionDeclarationNames : FastSet.Set String
                             }
                     maybeReferenceImplementationModule =
                         case referenceModuleOrigin of
@@ -458,6 +492,7 @@ callCheck context call =
                                     { declaredExpressionImplementations = context.declaredExpressionImplementations
                                     , extractSourceCode = context.extractSourceCode
                                     , moduleOriginLookup = context.moduleOriginLookup
+                                    , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
                                     }
 
                             moduleNamePart0 :: moduleNamePart1Up ->
@@ -548,17 +583,86 @@ callCheck context call =
                                                 , letDestructuringListReverse = []
                                                 }
 
-                                    resultString : String
-                                    resultString =
+                                    referenceImplementationResultSource : String
+                                    referenceImplementationResultSource =
                                         referenceImplementationModule.extractSourceCode
                                             (referenceImplementation.result
                                                 |> Elm.Syntax.Node.range
                                             )
-                                            |> expressionStringSubstituteVariables
-                                                filledInList.variables
-                                                referenceImplementation.result
+
+                                    resultString : String
+                                    resultString =
+                                        referenceImplementationResultSource
+                                            |> sourceApplyEdits
+                                                (expressionStringSubstituteVariablesFixes
+                                                    filledInList.variables
+                                                    referenceImplementation.result
+                                                    referenceImplementationResultSource
+                                                    ++ (referenceImplementationReferences
+                                                            |> List.filterMap
+                                                                (\referenceInResult ->
+                                                                    case context.imports |> FastDict.get referenceInResult.moduleOrigin of
+                                                                        Nothing ->
+                                                                            Nothing
+
+                                                                        Just referenceInResultLocalImport ->
+                                                                            Just
+                                                                                { range =
+                                                                                    referenceInResult.range
+                                                                                        |> rangeAsRelativeTo
+                                                                                            (referenceImplementation.result |> Elm.Syntax.Node.range |> .start)
+                                                                                , replacement =
+                                                                                    case referenceInResultLocalImport.alias of
+                                                                                        Nothing ->
+                                                                                            String.join "." referenceInResult.moduleOrigin ++ "." ++ referenceInResult.name
+
+                                                                                        Just localAlias ->
+                                                                                            localAlias ++ "." ++ referenceInResult.name
+                                                                                }
+                                                                )
+                                                       )
+                                                )
                                             |> unindent
                                             |> indentBy (indentation + 1)
+
+                                    referenceImplementationReferences :
+                                        List
+                                            { range : Elm.Syntax.Range.Range
+                                            , moduleOrigin : Elm.Syntax.ModuleName.ModuleName
+                                            , name : String
+                                            }
+                                    referenceImplementationReferences =
+                                        referenceImplementation.result
+                                            |> expressionReferences
+                                            |> List.filterMap
+                                                (\(Elm.Syntax.Node.Node resultReferenceRange ( _, unqualified )) ->
+                                                    case
+                                                        Review.ModuleNameLookupTable.moduleNameAt
+                                                            referenceImplementationModule.moduleOriginLookup
+                                                            resultReferenceRange
+                                                    of
+                                                        Nothing ->
+                                                            Nothing
+
+                                                        Just [] ->
+                                                            -- TODO only if module-declared
+                                                            if referenceImplementationModule.moduleExpressionDeclarationNames |> FastSet.member unqualified then
+                                                                Just
+                                                                    { range = resultReferenceRange
+                                                                    , moduleOrigin = referenceModuleOrigin
+                                                                    , name = unqualified
+                                                                    }
+
+                                                            else
+                                                                Nothing
+
+                                                        Just (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up) ->
+                                                            Just
+                                                                { range = resultReferenceRange
+                                                                , moduleOrigin = resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up
+                                                                , name = unqualified
+                                                                }
+                                                )
 
                                     importFixes : List Review.Fix.Fix
                                     importFixes =
@@ -568,29 +672,12 @@ callCheck context call =
 
                                             _ :: _ ->
                                                 FastSet.diff
-                                                    (referenceImplementation.result
-                                                        |> expressionReferences
-                                                        |> List.foldl
-                                                            (\(Elm.Syntax.Node.Node resultReferenceRange _) soFar ->
-                                                                case
-                                                                    Review.ModuleNameLookupTable.moduleNameAt
-                                                                        referenceImplementationModule.moduleOriginLookup
-                                                                        resultReferenceRange
-                                                                of
-                                                                    Nothing ->
-                                                                        soFar
-
-                                                                    Just [] ->
-                                                                        -- since we called a reference from the same module,
-                                                                        -- we must have already imported it
-                                                                        soFar
-
-                                                                    Just (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up) ->
-                                                                        soFar |> FastSet.insert (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up)
-                                                            )
-                                                            FastSet.empty
+                                                    (referenceImplementationReferences
+                                                        |> List.map .moduleOrigin
+                                                        |> FastSet.fromList
+                                                        |> FastSet.remove []
                                                     )
-                                                    context.imports
+                                                    (context.imports |> FastDict.keys |> FastSet.fromList)
                                                     |> FastSet.toList
                                                     |> List.map
                                                         (\moduleNameToImport ->
@@ -672,6 +759,7 @@ type alias ProjectContext =
             Elm.Syntax.ModuleName.ModuleName
             { extractSourceCode : Elm.Syntax.Range.Range -> String
             , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
+            , moduleExpressionDeclarationNames : FastSet.Set String
             , declaredExpressionImplementations :
                 FastDict.Dict
                     String
@@ -688,8 +776,9 @@ type alias ModuleContext =
     , moduleExposing : Elm.Syntax.Exposing.Exposing
     , moduleDocumentation : Maybe (Elm.Syntax.Node.Node String)
     , importStartRow : Int
-    , imports : FastSet.Set Elm.Syntax.ModuleName.ModuleName
+    , imports : FastDict.Dict Elm.Syntax.ModuleName.ModuleName { alias : Maybe String }
     , comments : List (Elm.Syntax.Node.Node String)
+    , moduleExpressionDeclarationNames : FastSet.Set String
     , declaredExpressionImplementations :
         FastDict.Dict
             String
@@ -701,6 +790,7 @@ type alias ModuleContext =
             Elm.Syntax.ModuleName.ModuleName
             { extractSourceCode : Elm.Syntax.Range.Range -> String
             , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
+            , moduleExpressionDeclarationNames : FastSet.Set String
             , declaredExpressionImplementations :
                 FastDict.Dict
                     String
@@ -731,8 +821,9 @@ projectToModuleContext =
             , moduleExposing = Elm.Syntax.Exposing.All Elm.Syntax.Range.empty
             , moduleDocumentation = Nothing
             , importStartRow = 2
-            , imports = FastSet.empty
+            , imports = FastDict.empty
             , comments = []
+            , moduleExpressionDeclarationNames = FastSet.empty
             , declaredExpressionImplementations = FastDict.empty
             , importedModules = projectContext.byModule
             }
@@ -750,18 +841,19 @@ moduleToProjectContext =
                     { extractSourceCode = moduleContext.extractSourceCode
                     , moduleOriginLookup = moduleContext.moduleOriginLookup
                     , declaredExpressionImplementations = moduleContext.declaredExpressionImplementations
+                    , moduleExpressionDeclarationNames = moduleContext.moduleExpressionDeclarationNames
                     }
             }
         )
         |> Review.Rule.withModuleName
 
 
-expressionStringSubstituteVariables :
+expressionStringSubstituteVariablesFixes :
     List { name : String, replacement : String }
     -> Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
     -> String
-    -> String
-expressionStringSubstituteVariables variableSubstitutions expressionNode expressionSource =
+    -> List { range : Elm.Syntax.Range.Range, replacement : String }
+expressionStringSubstituteVariablesFixes variableSubstitutions expressionNode expressionSource =
     let
         maximumIndentation : Int
         maximumIndentation =
@@ -771,28 +863,25 @@ expressionStringSubstituteVariables variableSubstitutions expressionNode express
                 |> List.maximum
                 |> Maybe.withDefault 1
     in
-    expressionSource
-        |> sourceApplyEdits
-            (variableSubstitutions
-                |> List.concatMap
-                    (\variableSubstitution ->
-                        let
-                            replacement : String
-                            replacement =
-                                variableSubstitution.replacement |> indentBy maximumIndentation
-                        in
-                        expressionNode
-                            |> expressionVariableUsesOf variableSubstitution.name
-                            |> List.map
-                                (\variableUseRange ->
-                                    { range =
-                                        variableUseRange
-                                            |> rangeAsRelativeTo
-                                                (expressionNode |> Elm.Syntax.Node.range |> .start)
-                                    , replacement = replacement
-                                    }
-                                )
-                    )
+    variableSubstitutions
+        |> List.concatMap
+            (\variableSubstitution ->
+                let
+                    replacement : String
+                    replacement =
+                        variableSubstitution.replacement |> indentBy maximumIndentation
+                in
+                expressionNode
+                    |> expressionVariableUsesOf variableSubstitution.name
+                    |> List.map
+                        (\variableUseRange ->
+                            { range =
+                                variableUseRange
+                                    |> rangeAsRelativeTo
+                                        (expressionNode |> Elm.Syntax.Node.range |> .start)
+                            , replacement = replacement
+                            }
+                        )
             )
 
 

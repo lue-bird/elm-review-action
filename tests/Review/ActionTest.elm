@@ -470,6 +470,43 @@ a =
                               )
                             ]
                 )
+            , Test.test "fully applied, declared in imported module with locally aliased imports, variable pattern, simple argument"
+                (\() ->
+                    [ """module Add2 exposing (add2)
+import Array
+add2 x =
+    x + Array.length (Array.fromList [ (), () ])
+"""
+                    , """module A exposing (..)
+import Add2
+import Array as CoreArray
+
+a =
+        Add2.add2
+            {-!inline-}
+            1
+"""
+                    ]
+                        |> Review.Test.runOnModules Review.Action.rule
+                        |> Review.Test.expectErrorsForModules
+                            [ ( "A"
+                              , [ Review.Test.error
+                                    { message = "inline Add2.add2"
+                                    , details = [ "The action command !inline placed in a comment after Add2.add2 in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                                    , under = "Add2.add2"
+                                    }
+                                    |> Review.Test.whenFixed
+                                        """module A exposing (..)
+import Add2
+import Array as CoreArray
+
+a =
+        (1 + CoreArray.length (CoreArray.fromList [ (), () ]))
+"""
+                                ]
+                              )
+                            ]
+                )
             , Test.test "fully applied, ignore pattern"
                 (\() ->
                     """module A exposing (..)
