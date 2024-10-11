@@ -16,6 +16,7 @@ import Elm.Syntax.Node
 import Elm.Syntax.Pattern
 import Elm.Syntax.Range
 import FastDict
+import FastSet
 import Review.Fix
 import Review.ModuleNameLookupTable
 import Review.Rule
@@ -43,15 +44,17 @@ rule =
             (\moduleVisitor ->
                 moduleVisitor
                     |> Review.Rule.withModuleDefinitionVisitor
-                        (\(Elm.Syntax.Node.Node _ moduleHeader) context ->
+                        (\(Elm.Syntax.Node.Node moduleHeaderRange moduleHeader) context ->
                             ( []
                             , { moduleOriginLookup = context.moduleOriginLookup
                               , extractSourceCode = context.extractSourceCode
                               , importedModules = context.importedModules
-                              , moduleExposing = moduleHeader |> moduleHeaderExposing
-                              , moduleDocumentation = context.moduleDocumentation
                               , comments = context.comments
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              , moduleDocumentation = context.moduleDocumentation
+                              , moduleExposing = moduleHeader |> moduleHeaderExposing
+                              , importStartRow = moduleHeaderRange.end.row + 1
+                              , imports = context.imports
                               }
                             )
                         )
@@ -62,9 +65,34 @@ rule =
                               , extractSourceCode = context.extractSourceCode
                               , importedModules = context.importedModules
                               , moduleExposing = context.moduleExposing
-                              , moduleDocumentation = maybeModuleDocumentationNode
                               , comments = context.comments
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              , moduleDocumentation = maybeModuleDocumentationNode
+                              , imports = context.imports
+                              , importStartRow =
+                                    case maybeModuleDocumentationNode of
+                                        Nothing ->
+                                            context.importStartRow
+
+                                        Just (Elm.Syntax.Node.Node moduleDocumentationRange _) ->
+                                            moduleDocumentationRange.end.row + 1
+                              }
+                            )
+                        )
+                    |> Review.Rule.withImportVisitor
+                        (\(Elm.Syntax.Node.Node importRange import_) context ->
+                            ( []
+                            , { moduleOriginLookup = context.moduleOriginLookup
+                              , extractSourceCode = context.extractSourceCode
+                              , importedModules = context.importedModules
+                              , moduleExposing = context.moduleExposing
+                              , moduleDocumentation = context.moduleDocumentation
+                              , comments = context.comments
+                              , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              , importStartRow = importRange.end.row + 1
+                              , imports =
+                                    context.imports
+                                        |> FastSet.insert (import_.moduleName |> Elm.Syntax.Node.value)
                               }
                             )
                         )
@@ -76,8 +104,10 @@ rule =
                               , importedModules = context.importedModules
                               , moduleExposing = context.moduleExposing
                               , moduleDocumentation = context.moduleDocumentation
-                              , comments = comments
+                              , importStartRow = context.importStartRow
+                              , imports = context.imports
                               , declaredExpressionImplementations = context.declaredExpressionImplementations
+                              , comments = comments
                               }
                             )
                         )
@@ -89,7 +119,9 @@ rule =
                               , importedModules = context.importedModules
                               , moduleExposing = context.moduleExposing
                               , moduleDocumentation = context.moduleDocumentation
+                              , importStartRow = context.importStartRow
                               , comments = context.comments
+                              , imports = context.imports
                               , declaredExpressionImplementations =
                                     declarations
                                         |> List.foldl
@@ -416,6 +448,7 @@ callCheck context call =
                                     { parameters : List (Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern)
                                     , result : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
                                     }
+                            , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
                             , extractSourceCode : Elm.Syntax.Range.Range -> String
                             }
                     maybeReferenceImplementationModule =
@@ -424,6 +457,7 @@ callCheck context call =
                                 Just
                                     { declaredExpressionImplementations = context.declaredExpressionImplementations
                                     , extractSourceCode = context.extractSourceCode
+                                    , moduleOriginLookup = context.moduleOriginLookup
                                     }
 
                             moduleNamePart0 :: moduleNamePart1Up ->
@@ -525,6 +559,47 @@ callCheck context call =
                                                 referenceImplementation.result
                                             |> unindent
                                             |> indentBy (indentation + 1)
+
+                                    importFixes : List Review.Fix.Fix
+                                    importFixes =
+                                        case referenceModuleOrigin of
+                                            [] ->
+                                                []
+
+                                            _ :: _ ->
+                                                FastSet.diff
+                                                    (referenceImplementation.result
+                                                        |> expressionReferences
+                                                        |> List.foldl
+                                                            (\(Elm.Syntax.Node.Node resultReferenceRange _) soFar ->
+                                                                case
+                                                                    Review.ModuleNameLookupTable.moduleNameAt
+                                                                        referenceImplementationModule.moduleOriginLookup
+                                                                        resultReferenceRange
+                                                                of
+                                                                    Nothing ->
+                                                                        soFar
+
+                                                                    Just [] ->
+                                                                        -- since we called a reference from the same module,
+                                                                        -- we must have already imported it
+                                                                        soFar
+
+                                                                    Just (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up) ->
+                                                                        soFar |> FastSet.insert (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up)
+                                                            )
+                                                            FastSet.empty
+                                                    )
+                                                    context.imports
+                                                    |> FastSet.toList
+                                                    |> List.map
+                                                        (\moduleNameToImport ->
+                                                            Review.Fix.insertAt { row = context.importStartRow, column = 1 }
+                                                                ("import "
+                                                                    ++ (moduleNameToImport |> String.join ".")
+                                                                    ++ "\n"
+                                                                )
+                                                        )
                                 in
                                 [ Review.Rule.errorWithFix
                                     { message = "inline " ++ referenceString
@@ -535,7 +610,7 @@ callCheck context call =
                                         ]
                                     }
                                     call.referenceRange
-                                    [ Review.Fix.replaceRangeBy
+                                    (Review.Fix.replaceRangeBy
                                         call.range
                                         ("("
                                             ++ (case filledInList.letDestructuringListReverse of
@@ -586,7 +661,8 @@ callCheck context call =
                                                )
                                             ++ ")"
                                         )
-                                    ]
+                                        :: importFixes
+                                    )
                                 ]
 
 
@@ -595,6 +671,7 @@ type alias ProjectContext =
         FastDict.Dict
             Elm.Syntax.ModuleName.ModuleName
             { extractSourceCode : Elm.Syntax.Range.Range -> String
+            , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
             , declaredExpressionImplementations :
                 FastDict.Dict
                     String
@@ -610,6 +687,8 @@ type alias ModuleContext =
     , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
     , moduleExposing : Elm.Syntax.Exposing.Exposing
     , moduleDocumentation : Maybe (Elm.Syntax.Node.Node String)
+    , importStartRow : Int
+    , imports : FastSet.Set Elm.Syntax.ModuleName.ModuleName
     , comments : List (Elm.Syntax.Node.Node String)
     , declaredExpressionImplementations :
         FastDict.Dict
@@ -621,6 +700,7 @@ type alias ModuleContext =
         FastDict.Dict
             Elm.Syntax.ModuleName.ModuleName
             { extractSourceCode : Elm.Syntax.Range.Range -> String
+            , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
             , declaredExpressionImplementations :
                 FastDict.Dict
                     String
@@ -650,6 +730,8 @@ projectToModuleContext =
             , extractSourceCode = extractSourceCode
             , moduleExposing = Elm.Syntax.Exposing.All Elm.Syntax.Range.empty
             , moduleDocumentation = Nothing
+            , importStartRow = 2
+            , imports = FastSet.empty
             , comments = []
             , declaredExpressionImplementations = FastDict.empty
             , importedModules = projectContext.byModule
@@ -666,6 +748,7 @@ moduleToProjectContext =
             { byModule =
                 FastDict.singleton moduleName
                     { extractSourceCode = moduleContext.extractSourceCode
+                    , moduleOriginLookup = moduleContext.moduleOriginLookup
                     , declaredExpressionImplementations = moduleContext.declaredExpressionImplementations
                     }
             }
@@ -993,6 +1076,20 @@ expressionVariableUsesOf variableNameToFind expressionNode =
             nonVariable
                 |> expressionSubs
                 |> List.concatMap (\sub -> sub |> expressionVariableUsesOf variableNameToFind)
+
+
+expressionReferences :
+    Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
+    -> List (Elm.Syntax.Node.Node ( Elm.Syntax.ModuleName.ModuleName, String ))
+expressionReferences expressionNode =
+    case expressionNode of
+        Elm.Syntax.Node.Node variableRange (Elm.Syntax.Expression.FunctionOrValue qualification unqualified) ->
+            [ Elm.Syntax.Node.Node variableRange ( qualification, unqualified ) ]
+
+        nonVariable ->
+            nonVariable
+                |> expressionSubs
+                |> List.concatMap expressionReferences
 
 
 {-| All surface-level child expressions
