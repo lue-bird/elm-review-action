@@ -462,295 +462,325 @@ callCheck context call =
                 comment0 :: comment1Up ->
                     (comment0 :: comment1Up)
                         |> List.any (\comment -> comment |> String.contains "!inline")
-    in
-    if Basics.not hasInlineMark then
-        []
 
-    else
-        case Review.ModuleNameLookupTable.moduleNameAt context.moduleOriginLookup call.referenceRange of
-            Nothing ->
-                []
-
-            Just referenceModuleOrigin ->
-                let
-                    maybeReferenceImplementationModule :
-                        Maybe
-                            { declaredExpressionImplementations :
-                                FastDict.Dict
-                                    String
-                                    { parameters : List (Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern)
-                                    , result : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
-                                    }
-                            , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
-                            , extractSourceCode : Elm.Syntax.Range.Range -> String
-                            , moduleExpressionDeclarationNames : FastSet.Set String
+        maybeReferenceInfo :
+            Maybe
+                { implementation :
+                    { parameters : List (Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern)
+                    , result : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
+                    }
+                , moduleOrigin : Elm.Syntax.ModuleName.ModuleName
+                , implementationModule :
+                    { declaredExpressionImplementations :
+                        FastDict.Dict
+                            String
+                            { parameters : List (Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern)
+                            , result : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
                             }
-                    maybeReferenceImplementationModule =
-                        case referenceModuleOrigin of
-                            [] ->
-                                Just
-                                    { declaredExpressionImplementations = context.declaredExpressionImplementations
-                                    , extractSourceCode = context.extractSourceCode
-                                    , moduleOriginLookup = context.moduleOriginLookup
-                                    , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
-                                    }
+                    , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
+                    , extractSourceCode : Elm.Syntax.Range.Range -> String
+                    , moduleExpressionDeclarationNames : FastSet.Set String
+                    }
+                }
+        maybeReferenceInfo =
+            if Basics.not hasInlineMark then
+                Nothing
 
-                            moduleNamePart0 :: moduleNamePart1Up ->
-                                context.importedModules |> FastDict.get (moduleNamePart0 :: moduleNamePart1Up)
-                in
-                case maybeReferenceImplementationModule of
+            else
+                case Review.ModuleNameLookupTable.moduleNameAt context.moduleOriginLookup call.referenceRange of
                     Nothing ->
-                        []
+                        Nothing
 
-                    Just referenceImplementationModule ->
-                        case referenceImplementationModule.declaredExpressionImplementations |> FastDict.get call.referenceUnqualified of
-                            Nothing ->
-                                []
-
-                            Just referenceImplementation ->
-                                let
-                                    referenceString : String
-                                    referenceString =
-                                        qualifiedToString { qualification = referenceModuleOrigin, unqualified = call.referenceUnqualified }
-
-                                    indentation : Int
-                                    indentation =
-                                        call.range.start.column - 1
-
-                                    appliedArgumentCount : Int
-                                    appliedArgumentCount =
-                                        1 + (call.argument1Up |> List.length)
-
-                                    filledInList :
-                                        { letDestructuringListReverse : List { pattern : String, expression : String }
-                                        , variables : List { name : String, replacement : String }
-                                        }
-                                    filledInList =
-                                        List.map2
-                                            (\curriedParameter replacement ->
-                                                { curriedParameter = curriedParameter
-                                                , replacement = replacement
-                                                }
-                                            )
-                                            referenceImplementation.parameters
-                                            (call.argument0 :: call.argument1Up)
-                                            |> List.foldl
-                                                (\filledIn soFar ->
-                                                    let
-                                                        (Elm.Syntax.Node.Node curriedParameterRange curriedParameterPattern) =
-                                                            filledIn.curriedParameter
-                                                    in
-                                                    case curriedParameterPattern of
-                                                        Elm.Syntax.Pattern.AllPattern ->
-                                                            soFar
-
-                                                        Elm.Syntax.Pattern.UnitPattern ->
-                                                            soFar
-
-                                                        Elm.Syntax.Pattern.VarPattern name ->
-                                                            if filledIn.replacement |> Elm.Syntax.Node.value |> expressionIsSimple then
-                                                                { letDestructuringListReverse = soFar.letDestructuringListReverse
-                                                                , variables =
-                                                                    { name = name
-                                                                    , replacement =
-                                                                        context.extractSourceCode
-                                                                            (filledIn.replacement |> Elm.Syntax.Node.range)
-                                                                    }
-                                                                        :: soFar.variables
-                                                                }
-
-                                                            else
-                                                                { variables = soFar.variables
-                                                                , letDestructuringListReverse =
-                                                                    { pattern = referenceImplementationModule.extractSourceCode curriedParameterRange
-                                                                    , expression =
-                                                                        context.extractSourceCode (filledIn.replacement |> Elm.Syntax.Node.range)
-                                                                    }
-                                                                        :: soFar.letDestructuringListReverse
-                                                                }
-
-                                                        _ ->
-                                                            { variables = soFar.variables
-                                                            , letDestructuringListReverse =
-                                                                { pattern = referenceImplementationModule.extractSourceCode curriedParameterRange
-                                                                , expression =
-                                                                    context.extractSourceCode (filledIn.replacement |> Elm.Syntax.Node.range)
-                                                                }
-                                                                    :: soFar.letDestructuringListReverse
-                                                            }
-                                                )
-                                                { variables = []
-                                                , letDestructuringListReverse = []
-                                                }
-
-                                    referenceImplementationResultSource : String
-                                    referenceImplementationResultSource =
-                                        referenceImplementationModule.extractSourceCode
-                                            (referenceImplementation.result
-                                                |> Elm.Syntax.Node.range
-                                            )
-
-                                    resultString : String
-                                    resultString =
-                                        referenceImplementationResultSource
-                                            |> sourceApplyEdits
-                                                (expressionStringSubstituteVariablesFixes
-                                                    filledInList.variables
-                                                    referenceImplementation.result
-                                                    referenceImplementationResultSource
-                                                    ++ (referenceImplementationReferences
-                                                            |> List.filterMap
-                                                                (\referenceInResult ->
-                                                                    case context.imports |> FastDict.get referenceInResult.moduleOrigin of
-                                                                        Nothing ->
-                                                                            Nothing
-
-                                                                        Just referenceInResultLocalImport ->
-                                                                            Just
-                                                                                { range =
-                                                                                    referenceInResult.range
-                                                                                        |> rangeAsRelativeTo
-                                                                                            (referenceImplementation.result |> Elm.Syntax.Node.range |> .start)
-                                                                                , replacement =
-                                                                                    case referenceInResultLocalImport.alias of
-                                                                                        Nothing ->
-                                                                                            String.join "." referenceInResult.moduleOrigin ++ "." ++ referenceInResult.name
-
-                                                                                        Just localAlias ->
-                                                                                            localAlias ++ "." ++ referenceInResult.name
-                                                                                }
-                                                                )
-                                                       )
-                                                )
-                                            |> unindent
-                                            |> indentBy (indentation + 1)
-
-                                    referenceImplementationReferences :
-                                        List
-                                            { range : Elm.Syntax.Range.Range
-                                            , moduleOrigin : Elm.Syntax.ModuleName.ModuleName
-                                            , name : String
+                    Just referenceModuleOrigin ->
+                        let
+                            maybeReferenceImplementationModule :
+                                Maybe
+                                    { declaredExpressionImplementations :
+                                        FastDict.Dict
+                                            String
+                                            { parameters : List (Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern)
+                                            , result : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
                                             }
-                                    referenceImplementationReferences =
-                                        referenceImplementation.result
-                                            |> expressionReferences
-                                            |> List.filterMap
-                                                (\(Elm.Syntax.Node.Node resultReferenceRange ( _, unqualified )) ->
-                                                    case
-                                                        Review.ModuleNameLookupTable.moduleNameAt
-                                                            referenceImplementationModule.moduleOriginLookup
-                                                            resultReferenceRange
-                                                    of
-                                                        Nothing ->
-                                                            Nothing
-
-                                                        Just [] ->
-                                                            -- TODO only if module-declared
-                                                            if referenceImplementationModule.moduleExpressionDeclarationNames |> FastSet.member unqualified then
-                                                                Just
-                                                                    { range = resultReferenceRange
-                                                                    , moduleOrigin = referenceModuleOrigin
-                                                                    , name = unqualified
-                                                                    }
-
-                                                            else
-                                                                Nothing
-
-                                                        Just (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up) ->
-                                                            Just
-                                                                { range = resultReferenceRange
-                                                                , moduleOrigin = resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up
-                                                                , name = unqualified
-                                                                }
-                                                )
-
-                                    importFixes : List Review.Fix.Fix
-                                    importFixes =
-                                        case referenceModuleOrigin of
-                                            [] ->
-                                                []
-
-                                            _ :: _ ->
-                                                FastSet.diff
-                                                    (referenceImplementationReferences
-                                                        |> List.map .moduleOrigin
-                                                        |> FastSet.fromList
-                                                        |> FastSet.remove []
-                                                    )
-                                                    (context.imports |> FastDict.keys |> FastSet.fromList)
-                                                    |> FastSet.toList
-                                                    |> List.map
-                                                        (\moduleNameToImport ->
-                                                            Review.Fix.insertAt { row = context.importStartRow, column = 1 }
-                                                                ("import "
-                                                                    ++ (moduleNameToImport |> String.join ".")
-                                                                    ++ "\n"
-                                                                )
-                                                        )
-                                in
-                                [ Review.Rule.errorWithFix
-                                    { message = "inline " ++ referenceString
-                                    , details =
-                                        [ "The action command !inline placed in a comment after "
-                                            ++ referenceString
-                                            ++ " in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment."
-                                        ]
+                                    , moduleOriginLookup : Review.ModuleNameLookupTable.ModuleNameLookupTable
+                                    , extractSourceCode : Elm.Syntax.Range.Range -> String
+                                    , moduleExpressionDeclarationNames : FastSet.Set String
                                     }
-                                    call.referenceRange
-                                    (Review.Fix.replaceRangeBy
-                                        call.range
-                                        ("("
-                                            ++ (case filledInList.letDestructuringListReverse of
-                                                    [] ->
-                                                        ""
+                            maybeReferenceImplementationModule =
+                                case referenceModuleOrigin of
+                                    [] ->
+                                        Just
+                                            { declaredExpressionImplementations = context.declaredExpressionImplementations
+                                            , extractSourceCode = context.extractSourceCode
+                                            , moduleOriginLookup = context.moduleOriginLookup
+                                            , moduleExpressionDeclarationNames = context.moduleExpressionDeclarationNames
+                                            }
 
-                                                    letDestructuringLast :: letDestructuringBeforeLastToFirst ->
-                                                        "let\n"
-                                                            ++ ((letDestructuringLast :: letDestructuringBeforeLastToFirst)
-                                                                    |> List.reverse
-                                                                    |> List.map
-                                                                        (\letDestructuring ->
-                                                                            String.repeat (indentation + 4) " "
-                                                                                ++ letDestructuring.pattern
-                                                                                ++ " =\n"
-                                                                                ++ String.repeat (indentation + 8) " "
-                                                                                ++ (letDestructuring.expression
-                                                                                        |> indentBy (indentation + 8)
-                                                                                   )
-                                                                        )
-                                                                    |> String.join "\n\n"
-                                                               )
-                                                            ++ "\n"
-                                                            ++ String.repeat (indentation + 1) " "
-                                                            ++ "in\n"
-                                                            ++ String.repeat (indentation + 1) " "
-                                               )
-                                            ++ (case
-                                                    referenceImplementation.parameters
-                                                        |> List.drop appliedArgumentCount
-                                                of
-                                                    [] ->
-                                                        resultString
+                                    moduleNamePart0 :: moduleNamePart1Up ->
+                                        context.importedModules |> FastDict.get (moduleNamePart0 :: moduleNamePart1Up)
+                        in
+                        case maybeReferenceImplementationModule of
+                            Nothing ->
+                                Nothing
 
-                                                    curriedParameter0 :: curriedParameter1Up ->
-                                                        "\\"
-                                                            ++ ((curriedParameter0 :: curriedParameter1Up)
-                                                                    |> List.map
-                                                                        (\(Elm.Syntax.Node.Node curriedParameterRange _) ->
-                                                                            referenceImplementationModule.extractSourceCode curriedParameterRange
-                                                                                ++ " "
-                                                                        )
-                                                                    |> String.concat
-                                                               )
-                                                            ++ "->\n"
-                                                            ++ String.repeat (indentation + 4) " "
-                                                            ++ (resultString |> indentBy 4)
-                                               )
-                                            ++ ")"
-                                        )
-                                        :: importFixes
+                            Just referenceImplementationModule ->
+                                case referenceImplementationModule.declaredExpressionImplementations |> FastDict.get call.referenceUnqualified of
+                                    Nothing ->
+                                        Nothing
+
+                                    Just referenceImplementation ->
+                                        Just
+                                            { implementation = referenceImplementation
+                                            , moduleOrigin = referenceModuleOrigin
+                                            , implementationModule = referenceImplementationModule
+                                            }
+    in
+    case maybeReferenceInfo of
+        Nothing ->
+            []
+
+        Just referenceInfo ->
+            let
+                referenceString : String
+                referenceString =
+                    qualifiedToString { qualification = referenceInfo.moduleOrigin, unqualified = call.referenceUnqualified }
+
+                indentation : Int
+                indentation =
+                    call.range.start.column - 1
+
+                appliedArgumentCount : Int
+                appliedArgumentCount =
+                    1 + (call.argument1Up |> List.length)
+
+                filledInList :
+                    { letDestructuringListReverse : List { pattern : String, expression : String }
+                    , variables : List { name : String, replacement : String }
+                    }
+                filledInList =
+                    List.map2
+                        (\curriedParameter replacement ->
+                            { curriedParameter = curriedParameter
+                            , replacement = replacement
+                            }
+                        )
+                        referenceInfo.implementation.parameters
+                        (call.argument0 :: call.argument1Up)
+                        |> List.foldl
+                            (\filledIn soFar ->
+                                let
+                                    (Elm.Syntax.Node.Node curriedParameterRange curriedParameterPattern) =
+                                        filledIn.curriedParameter
+                                in
+                                case curriedParameterPattern of
+                                    Elm.Syntax.Pattern.AllPattern ->
+                                        soFar
+
+                                    Elm.Syntax.Pattern.UnitPattern ->
+                                        soFar
+
+                                    Elm.Syntax.Pattern.VarPattern name ->
+                                        if filledIn.replacement |> Elm.Syntax.Node.value |> expressionIsSimple then
+                                            { letDestructuringListReverse = soFar.letDestructuringListReverse
+                                            , variables =
+                                                { name = name
+                                                , replacement =
+                                                    context.extractSourceCode
+                                                        (filledIn.replacement |> Elm.Syntax.Node.range)
+                                                }
+                                                    :: soFar.variables
+                                            }
+
+                                        else
+                                            { variables = soFar.variables
+                                            , letDestructuringListReverse =
+                                                { pattern = referenceInfo.implementationModule.extractSourceCode curriedParameterRange
+                                                , expression =
+                                                    context.extractSourceCode (filledIn.replacement |> Elm.Syntax.Node.range)
+                                                }
+                                                    :: soFar.letDestructuringListReverse
+                                            }
+
+                                    _ ->
+                                        { variables = soFar.variables
+                                        , letDestructuringListReverse =
+                                            { pattern = referenceInfo.implementationModule.extractSourceCode curriedParameterRange
+                                            , expression =
+                                                context.extractSourceCode (filledIn.replacement |> Elm.Syntax.Node.range)
+                                            }
+                                                :: soFar.letDestructuringListReverse
+                                        }
+                            )
+                            { variables = []
+                            , letDestructuringListReverse = []
+                            }
+
+                referenceImplementationResultSource : String
+                referenceImplementationResultSource =
+                    referenceInfo.implementationModule.extractSourceCode
+                        (referenceInfo.implementation.result
+                            |> Elm.Syntax.Node.range
+                        )
+
+                resultString : String
+                resultString =
+                    referenceImplementationResultSource
+                        |> sourceApplyEdits
+                            (expressionStringSubstituteVariablesFixes
+                                filledInList.variables
+                                referenceInfo.implementation.result
+                                referenceImplementationResultSource
+                                ++ (referenceImplementationReferences
+                                        |> List.filterMap
+                                            (\referenceInResult ->
+                                                case context.imports |> FastDict.get referenceInResult.moduleOrigin of
+                                                    Nothing ->
+                                                        Nothing
+
+                                                    Just referenceInResultLocalImport ->
+                                                        Just
+                                                            { range =
+                                                                referenceInResult.range
+                                                                    |> rangeAsRelativeTo
+                                                                        (referenceInfo.implementation.result |> Elm.Syntax.Node.range |> .start)
+                                                            , replacement =
+                                                                case referenceInResultLocalImport.alias of
+                                                                    Nothing ->
+                                                                        String.join "." referenceInResult.moduleOrigin ++ "." ++ referenceInResult.name
+
+                                                                    Just localAlias ->
+                                                                        localAlias ++ "." ++ referenceInResult.name
+                                                            }
+                                            )
+                                   )
+                            )
+                        |> unindent
+                        |> indentBy (indentation + 1)
+
+                referenceImplementationReferences :
+                    List
+                        { range : Elm.Syntax.Range.Range
+                        , moduleOrigin : Elm.Syntax.ModuleName.ModuleName
+                        , name : String
+                        }
+                referenceImplementationReferences =
+                    referenceInfo.implementation.result
+                        |> expressionReferences
+                        |> List.filterMap
+                            (\(Elm.Syntax.Node.Node resultReferenceRange ( _, unqualified )) ->
+                                case
+                                    Review.ModuleNameLookupTable.moduleNameAt
+                                        referenceInfo.implementationModule.moduleOriginLookup
+                                        resultReferenceRange
+                                of
+                                    Nothing ->
+                                        Nothing
+
+                                    Just [] ->
+                                        if referenceInfo.implementationModule.moduleExpressionDeclarationNames |> FastSet.member unqualified then
+                                            Just
+                                                { range = resultReferenceRange
+                                                , moduleOrigin = referenceInfo.moduleOrigin
+                                                , name = unqualified
+                                                }
+
+                                        else
+                                            Nothing
+
+                                    Just (resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up) ->
+                                        Just
+                                            { range = resultReferenceRange
+                                            , moduleOrigin = resultReferenceModuleNamePart0 :: resultReferenceModuleNamePart1Up
+                                            , name = unqualified
+                                            }
+                            )
+
+                importFixes : List Review.Fix.Fix
+                importFixes =
+                    case referenceInfo.moduleOrigin of
+                        [] ->
+                            []
+
+                        _ :: _ ->
+                            FastSet.diff
+                                (referenceImplementationReferences
+                                    |> List.map .moduleOrigin
+                                    |> FastSet.fromList
+                                    |> FastSet.remove []
+                                )
+                                (context.imports |> FastDict.keys |> FastSet.fromList)
+                                |> FastSet.toList
+                                |> List.map
+                                    (\moduleNameToImport ->
+                                        Review.Fix.insertAt { row = context.importStartRow, column = 1 }
+                                            ("import "
+                                                ++ (moduleNameToImport |> String.join ".")
+                                                ++ "\n"
+                                            )
                                     )
-                                ]
+            in
+            [ Review.Rule.errorWithFix
+                { message = "inline " ++ referenceString
+                , details =
+                    [ "The action command !inline placed in a comment after "
+                        ++ referenceString
+                        ++ " in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment."
+                    ]
+                }
+                call.referenceRange
+                (Review.Fix.replaceRangeBy
+                    call.range
+                    ("("
+                        ++ (case filledInList.letDestructuringListReverse of
+                                [] ->
+                                    ""
+
+                                letDestructuringLast :: letDestructuringBeforeLastToFirst ->
+                                    "let\n"
+                                        ++ ((letDestructuringLast :: letDestructuringBeforeLastToFirst)
+                                                |> List.reverse
+                                                |> List.map
+                                                    (\letDestructuring ->
+                                                        String.repeat (indentation + 4) " "
+                                                            ++ letDestructuring.pattern
+                                                            ++ " =\n"
+                                                            ++ String.repeat (indentation + 8) " "
+                                                            ++ (letDestructuring.expression
+                                                                    |> indentBy (indentation + 8)
+                                                               )
+                                                    )
+                                                |> String.join "\n\n"
+                                           )
+                                        ++ "\n"
+                                        ++ String.repeat (indentation + 1) " "
+                                        ++ "in\n"
+                                        ++ String.repeat (indentation + 1) " "
+                           )
+                        ++ (case
+                                referenceInfo.implementation.parameters
+                                    |> List.drop appliedArgumentCount
+                            of
+                                [] ->
+                                    resultString
+
+                                curriedParameter0 :: curriedParameter1Up ->
+                                    "\\"
+                                        ++ ((curriedParameter0 :: curriedParameter1Up)
+                                                |> List.map
+                                                    (\(Elm.Syntax.Node.Node curriedParameterRange _) ->
+                                                        referenceInfo.implementationModule.extractSourceCode curriedParameterRange
+                                                            ++ " "
+                                                    )
+                                                |> String.concat
+                                           )
+                                        ++ "->\n"
+                                        ++ String.repeat (indentation + 4) " "
+                                        ++ (resultString |> indentBy 4)
+                           )
+                        ++ ")"
+                    )
+                    :: importFixes
+                )
+            ]
 
 
 type alias ProjectContext =
