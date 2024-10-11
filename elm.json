@@ -3,7 +3,7 @@
     "name": "lue-bird/elm-review-action",
     "summary": "add a comment and let me transform your code",
     "license": "MIT",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "exposed-modules": [
         "Review.Action"
     ],
