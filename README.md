@@ -1,5 +1,5 @@
-The [`elm-review`](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/) rule
-[`Review.Action`](https://package.elm-lang.org/packages/lue-bird/elm-review-action/1.0.1/Review-Action)
+The [`elm-review`](https://dark.elm.dmy.fr/packages/jfmengels/elm-review/latest/) rule
+[`Review.Action`](https://dark.elm.dmy.fr/packages/elm-review-action/1.0.1/Review-Action)
 transforms your code as specified by comments like `--!inline` or `--!remove`.
 
 ### try it
