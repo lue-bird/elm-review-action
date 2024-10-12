@@ -369,6 +369,38 @@ a =
 """
                             ]
                 )
+            , Test.test "fully applied + additional argument, module-locally declared, variable pattern, simple argument"
+                (\() ->
+                    """module A exposing (..)
+add x =
+    (+) x
+
+a =
+        add
+            {-!inline-}
+            1
+            2
+"""
+                        |> Review.Test.run Review.Action.rule
+                        |> Review.Test.expectErrors
+                            [ Review.Test.error
+                                { message = "inline add"
+                                , details = [ "The action command !inline placed in a comment after add in the call triggers the suggestion of this automatic fix. Either apply the fix or remove the comment." ]
+                                , under = "add"
+                                }
+                                |> Review.Test.atExactly
+                                    { start = { row = 6, column = 9 }, end = { row = 6, column = 12 } }
+                                |> Review.Test.whenFixed
+                                    """module A exposing (..)
+add x =
+    (+) x
+
+a =
+        ((+) 1)
+            2
+"""
+                            ]
+                )
             , Test.test "partially applied, module-locally declared, variable pattern, simple argument"
                 (\() ->
                     """module A exposing (..)

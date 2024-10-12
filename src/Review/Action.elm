@@ -548,28 +548,36 @@ callCheck context call =
                 indentation =
                     call.range.start.column - 1
 
+                argumentsAndMatchingParameters :
+                    List
+                        { parameter : Elm.Syntax.Node.Node Elm.Syntax.Pattern.Pattern
+                        , replacement : Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
+                        }
+                argumentsAndMatchingParameters =
+                    List.map2
+                        (\parameter replacement ->
+                            { parameter = parameter
+                            , replacement = replacement
+                            }
+                        )
+                        referenceInfo.implementation.parameters
+                        (call.argument0 :: call.argument1Up)
+
                 appliedArgumentCount : Int
                 appliedArgumentCount =
-                    1 + (call.argument1Up |> List.length)
+                    argumentsAndMatchingParameters |> List.length
 
                 filledInList :
                     { letDestructuringListReverse : List { pattern : String, expression : String }
                     , variables : List { name : String, replacement : String }
                     }
                 filledInList =
-                    List.map2
-                        (\curriedParameter replacement ->
-                            { curriedParameter = curriedParameter
-                            , replacement = replacement
-                            }
-                        )
-                        referenceInfo.implementation.parameters
-                        (call.argument0 :: call.argument1Up)
+                    argumentsAndMatchingParameters
                         |> List.foldl
                             (\filledIn soFar ->
                                 let
                                     (Elm.Syntax.Node.Node curriedParameterRange curriedParameterPattern) =
-                                        filledIn.curriedParameter
+                                        filledIn.parameter
                                 in
                                 case curriedParameterPattern of
                                     Elm.Syntax.Pattern.AllPattern ->
@@ -717,6 +725,21 @@ callCheck context call =
                                                 ++ "\n"
                                             )
                                     )
+
+                appliedRange : Elm.Syntax.Range.Range
+                appliedRange =
+                    case argumentsAndMatchingParameters of
+                        [] ->
+                            call.referenceRange
+
+                        argument0AndMatchingParameter :: argument1UpAndMatchingParameters ->
+                            { start = call.range.start
+                            , end =
+                                listFilledLast ( argument0AndMatchingParameter, argument1UpAndMatchingParameters )
+                                    |> .replacement
+                                    |> Elm.Syntax.Node.range
+                                    |> .end
+                            }
             in
             [ Review.Rule.errorWithFix
                 { message = "inline " ++ referenceString
@@ -728,7 +751,7 @@ callCheck context call =
                 }
                 call.referenceRange
                 (Review.Fix.replaceRangeBy
-                    call.range
+                    appliedRange
                     ("("
                         ++ (case filledInList.letDestructuringListReverse of
                                 [] ->
